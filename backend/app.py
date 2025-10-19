@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 from .db import init_db
+from backend.routes import incoming, help_requests
 
 app = FastAPI(title="AI Helpdesk (backend)")
 
 @app.on_event("startup")
 def on_startup():
-    # create tables if they don't exist
     init_db()
+
+app.include_router(incoming.router)
+app.include_router(help_requests.router)
 
 @app.get("/")
 def root():
