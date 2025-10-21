@@ -1,5 +1,5 @@
 import uuid
-from backend.models import HelpRequest, RequestStatus
+from backend.models import HelpRequest, RequestStatus, KBEntry, AuditLog
 from backend.db import SessionLocal
 from datetime import datetime
 from sqlalchemy import update
@@ -44,7 +44,6 @@ def atomic_accept(request_id: str, supervisor_id: str):
     """
     db = SessionLocal()
     try:
-        # Try updating only if it's still pending
         result = db.query(HelpRequest).filter(
             HelpRequest.id == request_id,
             HelpRequest.status == RequestStatus.pending
@@ -58,5 +57,64 @@ def atomic_accept(request_id: str, supervisor_id: str):
         )
         db.commit()
         return result > 0  
+    finally:
+        db.close()        
+
+def resolve_help_request(request_id: str, supervisor_id: str, resolution_text: str):
+    """
+    Transactionally:
+      - create KB entry linked to request_id
+      - update help_request -> status = resolved, resolution_text, resolved_at
+      - insert an audit log entry
+    Returns: KBEntry object on success, raises Exception on failure.
+    """
+    db = SessionLocal()
+    try:
+        with db.begin(): 
+            
+            req = db.query(HelpRequest).filter(HelpRequest.id == request_id).with_for_update().first()
+            if not req:
+                raise ValueError("help_request not found")
+
+            
+            kb_id = f"kb_{uuid.uuid4().hex[:8]}"
+            kb = KBEntry(
+                id=kb_id,
+                question_snippet=(req.question_text or (req.transcript or ""))[:250],
+                answer_text=resolution_text,
+                source_request_id=request_id,
+                created_by=supervisor_id,
+                created_at=datetime.utcnow()
+            )
+            db.add(kb)
+
+            
+            req.status = RequestStatus.resolved
+            req.resolution_text = resolution_text
+            req.resolved_at = datetime.utcnow()
+
+            
+            audit = AuditLog(
+                id=f"audit_{uuid.uuid4().hex[:8]}",
+                request_id=request_id,
+                event_type="help_request.resolved",
+                payload=f"resolved_by={supervisor_id}",
+                user_id=supervisor_id,
+                created_at=datetime.utcnow()
+            )
+            db.add(audit)
+
+            db.flush()
+            kb_dict = {
+                "id": kb.id,
+                "question_snippet": kb.question_snippet,
+                "answer_text": kb.answer_text,
+                "source_request_id": kb.source_request_id,
+                "created_by": kb.created_by,
+                "created_at": kb.created_at.isoformat() if kb.created_at else None
+            }
+            db.refresh(kb)
+
+        return kb_dict
     finally:
         db.close()        

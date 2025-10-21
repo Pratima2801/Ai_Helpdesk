@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from .db import init_db
-from backend.routes import incoming, help_requests
+from backend.routes import incoming, help_requests, kb
 
 app = FastAPI(title="AI Helpdesk (backend)")
 
@@ -10,6 +10,7 @@ def on_startup():
 
 app.include_router(incoming.router)
 app.include_router(help_requests.router)
+app.include_router(kb.router)
 
 @app.get("/")
 def root():

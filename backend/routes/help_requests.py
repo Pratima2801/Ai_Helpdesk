@@ -1,8 +1,6 @@
-from fastapi import APIRouter, Query
-from backend.crud import list_help_requests
-from fastapi import HTTPException
-from backend.crud import atomic_accept
-from typing import List
+from fastapi import APIRouter, Query, HTTPException
+from backend.crud import list_help_requests, atomic_accept, resolve_help_request
+from backend.simulated_webhooks import send_followup_to_caller
 
 router = APIRouter()
 
@@ -45,3 +43,49 @@ def accept_help_request(request_id: str, payload: dict):
         return {"status": "accepted", "request_id": request_id, "accepted_by": supervisor_id}
     else:
         raise HTTPException(status_code=409, detail="Request already accepted or not found")    
+
+@router.post("/help-requests/{request_id}/resolve")
+def resolve_help_request_endpoint(request_id: str, payload: dict):
+    """
+    Supervisor resolves a help request.
+    Body must include: { "user_id": "...", "resolution_text": "..." }
+    This will create a KB entry, mark request resolved, and send follow-up to caller.
+    """
+    supervisor_id = payload.get("user_id")
+    resolution_text = payload.get("resolution_text")
+    if not supervisor_id or not resolution_text:
+        raise HTTPException(status_code=400, detail="user_id and resolution_text required")
+
+    try:
+        kb = resolve_help_request(request_id, supervisor_id, resolution_text)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        print("resolve_help_request error:", str(e))
+        raise HTTPException(status_code=500, detail="Failed to resolve request")
+
+    # Fetch caller_id to send follow-up (small separate session)
+    from backend.db import SessionLocal as _Session
+    from backend.models import HelpRequest as _HelpRequest
+    s = _Session()
+    try:
+        req = s.query(_HelpRequest).filter(_HelpRequest.id == request_id).first()
+        caller_id = req.caller_id if req else None
+    finally:
+        s.close()
+
+    
+    if caller_id:
+        sent = send_followup_to_caller(caller_id, request_id, resolution_text)
+        if not sent:
+            print(f"[FOLLOWUP FAILED] request={request_id} caller={caller_id}")
+    else:
+        print(f"[FOLLOWUP SKIPPED] caller not found for request {request_id}")
+
+    return {
+        "status": "resolved",
+        "request_id": request_id,
+        "kb_id": kb.get("id"),
+        "kb_question_snippet": kb.get("question_snippet"),
+        "kb_answer_text": kb.get("answer_text")
+    }
